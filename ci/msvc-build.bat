@@ -17,18 +17,53 @@
 
 @echo on
 
+if "%JOB%" == "Build_Debug" (
+  mkdir cpp\build-debug
+  pushd cpp\build-debug
+
+  cmake -G "%GENERATOR%" ^
+        -DARROW_BOOST_USE_SHARED=OFF ^
+        -DCMAKE_BUILD_TYPE=%CONFIGURATION% ^
+        -DARROW_CXXFLAGS="/MP" ^
+        ..  || exit /B
+
+  cmake --build . --config Debug || exit /B
+  popd
+
+  @rem Finish Debug build successfully
+  exit /B 0
+)
+
 conda update --yes --quiet conda
+conda config --set auto_update_conda false
+conda info -a
+
+conda config --set show_channel_urls True
+
+# Help with SSL timeouts to S3
+conda config --set remote_connect_timeout_secs 12
+
+conda config --add channels https://repo.continuum.io/pkgs/free
+conda config --add channels conda-forge
+conda info -a
 
 conda create -n arrow -q -y python=%PYTHON% ^
-      six pytest setuptools numpy pandas cython
-conda install -n arrow -q -y -c conda-forge ^
-      flatbuffers rapidjson ^
-      cmake git boost-cpp thrift-cpp snappy zlib brotli gflags
+      six pytest setuptools numpy pandas cython ^
+      thrift-cpp
+
+if "%JOB%" == "Toolchain" (
+  conda install -n arrow -q -y -c conda-forge ^
+      flatbuffers rapidjson cmake git boost-cpp ^
+      snappy zlib brotli gflags lz4-c zstd
+)
 
 call activate arrow
 
+if "%JOB%" == "Toolchain" (
+  set ARROW_BUILD_TOOLCHAIN=%CONDA_PREFIX%\Library
+)
+
 set ARROW_HOME=%CONDA_PREFIX%\Library
-set ARROW_BUILD_TOOLCHAIN=%CONDA_PREFIX%\Library
 
 @rem Build and test Arrow C++ libraries
 
@@ -38,11 +73,11 @@ pushd cpp\build
 cmake -G "%GENERATOR%" ^
       -DCMAKE_INSTALL_PREFIX=%CONDA_PREFIX%\Library ^
       -DARROW_BOOST_USE_SHARED=OFF ^
-      -DCMAKE_BUILD_TYPE=Release ^
+      -DCMAKE_BUILD_TYPE=%CONFIGURATION% ^
       -DARROW_CXXFLAGS="/WX /MP" ^
       -DARROW_PYTHON=ON ^
       ..  || exit /B
-cmake --build . --target INSTALL --config Release  || exit /B
+cmake --build . --target INSTALL --config %CONFIGURATION%  || exit /B
 
 @rem Needed so python-test.exe works
 set PYTHONPATH=%CONDA_PREFIX%\Lib;%CONDA_PREFIX%\Lib\site-packages;%CONDA_PREFIX%\python35.zip;%CONDA_PREFIX%\DLLs;%CONDA_PREFIX%;%PYTHONPATH%
@@ -60,11 +95,11 @@ set PARQUET_BUILD_TOOLCHAIN=%CONDA_PREFIX%\Library
 set PARQUET_HOME=%CONDA_PREFIX%\Library
 cmake -G "%GENERATOR%" ^
      -DCMAKE_INSTALL_PREFIX=%PARQUET_HOME% ^
-     -DCMAKE_BUILD_TYPE=Release ^
+     -DCMAKE_BUILD_TYPE=%CONFIGURATION% ^
      -DPARQUET_BOOST_USE_SHARED=OFF ^
      -DPARQUET_ZLIB_VENDORED=off ^
      -DPARQUET_BUILD_TESTS=off .. || exit /B
-cmake --build . --target INSTALL --config Release || exit /B
+cmake --build . --target INSTALL --config %CONFIGURATION% || exit /B
 popd
 
 @rem Build and import pyarrow

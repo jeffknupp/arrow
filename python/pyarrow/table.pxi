@@ -44,6 +44,11 @@ cdef class ChunkedArray:
         self.sp_chunked_array = chunked_array
         self.chunked_array = chunked_array.get()
 
+    property type:
+
+        def __get__(self):
+            return pyarrow_wrap_data_type(self.sp_chunked_array.get().type())
+
     cdef int _check_nullptr(self) except -1:
         if self.chunked_array == NULL:
             raise ReferenceError(
@@ -277,7 +282,6 @@ cdef shared_ptr[const CKeyValueMetadata] unbox_metadata(dict metadata):
 cdef int _schema_from_arrays(
         arrays, names, dict metadata, shared_ptr[CSchema]* schema) except -1:
     cdef:
-        Array arr
         Column col
         c_string c_name
         vector[shared_ptr[CField]] fields
@@ -289,23 +293,25 @@ cdef int _schema_from_arrays(
     if len(arrays) == 0:
         raise ValueError('Must pass at least one array')
 
-    if isinstance(arrays[0], Array):
-        if names is None:
-            raise ValueError('Must pass names when constructing '
-                             'from Array objects')
-        for i in range(K):
-            arr = arrays[i]
-            type_ = arr.type.sp_type
-            c_name = tobytes(names[i])
-            fields[i].reset(new CField(c_name, type_, True))
-    elif isinstance(arrays[0], Column):
+    if isinstance(arrays[0], Column):
         for i in range(K):
             col = arrays[i]
             type_ = col.sp_column.get().type()
             c_name = tobytes(col.name)
             fields[i].reset(new CField(c_name, type_, True))
     else:
-        raise TypeError(type(arrays[0]))
+        if names is None:
+            raise ValueError('Must pass names when constructing '
+                             'from Array objects')
+        for i in range(K):
+            val = arrays[i]
+            if isinstance(val, (Array, ChunkedArray)):
+                type_ = (<DataType> val.type).sp_type
+            else:
+                raise TypeError(type(val))
+
+            c_name = tobytes(names[i])
+            fields[i].reset(new CField(c_name, type_, True))
 
     schema.reset(new CSchema(fields, unbox_metadata(metadata)))
     return 0
@@ -321,6 +327,7 @@ cdef tuple _dataframe_to_arrays(
         list names = []
         list arrays = []
         list index_columns = []
+        list types = []
         DataType type = None
         dict metadata
         Py_ssize_t i
@@ -333,22 +340,25 @@ cdef tuple _dataframe_to_arrays(
     for name in df.columns:
         col = df[name]
         if schema is not None:
-            type = schema.field_by_name(name).type
+            field = schema.field_by_name(name)
+            type = getattr(field, "type", None)
 
-        arr = arrays.append(
-            Array.from_pandas(
-                col, type=type, timestamps_to_ms=timestamps_to_ms
-            )
+        array = Array.from_pandas(
+            col, type=type, timestamps_to_ms=timestamps_to_ms
         )
+        arrays.append(array)
         names.append(name)
+        types.append(array.type)
 
     for i, column in enumerate(index_columns):
-        arrays.append(
-            Array.from_pandas(column, timestamps_to_ms=timestamps_to_ms)
-        )
+        array = Array.from_pandas(column, timestamps_to_ms=timestamps_to_ms)
+        arrays.append(array)
         names.append(pdcompat.index_level_name(column, i))
+        types.append(array.type)
 
-    metadata = pdcompat.construct_metadata(df, index_columns, preserve_index)
+    metadata = pdcompat.construct_metadata(
+        df, index_columns, preserve_index, types
+    )
     return names, arrays, metadata
 
 
@@ -382,6 +392,30 @@ cdef class RecordBatch:
     def __len__(self):
         self._check_nullptr()
         return self.batch.num_rows()
+
+    def replace_schema_metadata(self, dict metadata=None):
+        """
+        EXPERIMENTAL: Create shallow copy of record batch by replacing schema
+        key-value metadata with the indicated new metadata (which may be None,
+        which deletes any existing metadata
+
+        Parameters
+        ----------
+        metadata : dict, default None
+
+        Returns
+        -------
+        shallow_copy : RecordBatch
+        """
+        cdef shared_ptr[CKeyValueMetadata] c_meta
+        if metadata is not None:
+            convert_metadata(metadata, &c_meta)
+
+        cdef shared_ptr[CRecordBatch] new_batch
+        with nogil:
+            new_batch = self.batch.ReplaceSchemaMetadata(c_meta)
+
+        return pyarrow_wrap_batch(new_batch)
 
     @property
     def num_columns(self):
@@ -427,8 +461,22 @@ cdef class RecordBatch:
 
         return self._schema
 
-    def __getitem__(self, i):
+    def column(self, i):
+        """
+        Select single column from record batcha
+
+        Returns
+        -------
+        column : pyarrow.Array
+        """
+        if not -self.num_columns <= i < self.num_columns:
+            raise IndexError(
+                'Record batch column index {:d} is out of range'.format(i)
+            )
         return pyarrow_wrap_array(self.batch.column(i))
+
+    def __getitem__(self, i):
+        return self.column(i)
 
     def slice(self, offset=0, length=None):
         """
@@ -605,6 +653,30 @@ cdef class Table:
             )
         return 0
 
+    def replace_schema_metadata(self, dict metadata=None):
+        """
+        EXPERIMENTAL: Create shallow copy of table by replacing schema
+        key-value metadata with the indicated new metadata (which may be None,
+        which deletes any existing metadata
+
+        Parameters
+        ----------
+        metadata : dict, default None
+
+        Returns
+        -------
+        shallow_copy : Table
+        """
+        cdef shared_ptr[CKeyValueMetadata] c_meta
+        if metadata is not None:
+            convert_metadata(metadata, &c_meta)
+
+        cdef shared_ptr[CTable] new_table
+        with nogil:
+            new_table = self.table.ReplaceSchemaMetadata(c_meta)
+
+        return pyarrow_wrap_table(new_table)
+
     def equals(self, Table other):
         """
         Check if contents of two tables are equal
@@ -713,6 +785,13 @@ cdef class Table:
                     make_shared[CColumn](
                         schema.get().field(i),
                         (<Array> arrays[i]).sp_array
+                    )
+                )
+            elif isinstance(arrays[i], ChunkedArray):
+                columns.push_back(
+                    make_shared[CColumn](
+                        schema.get().field(i),
+                        (<ChunkedArray> arrays[i]).sp_chunked_array
                     )
                 )
             elif isinstance(arrays[i], Column):

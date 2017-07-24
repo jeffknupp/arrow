@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import datetime
 import pytest
 import sys
 
@@ -23,6 +24,7 @@ import pandas as pd
 import pandas.util.testing as tm
 
 import pyarrow as pa
+from pyarrow.pandas_compat import get_logical_type
 import pyarrow.formatting as fmt
 
 
@@ -141,6 +143,12 @@ def test_array_slice():
         arr[::2]
 
 
+def test_array_factory_invalid_type():
+    arr = np.array([datetime.timedelta(1), datetime.timedelta(2)])
+    with pytest.raises(ValueError):
+        pa.array(arr)
+
+
 def test_dictionary_from_numpy():
     indices = np.repeat([0, 1, 2], 2)
     dictionary = np.array(['foo', 'bar', 'baz'], dtype=object)
@@ -189,3 +197,54 @@ def test_dictionary_with_pandas():
                                            categories=dictionary)
 
     tm.assert_series_equal(pd.Series(pandas2), pd.Series(ex_pandas2))
+
+
+def test_list_from_arrays():
+    offsets_arr = np.array([0, 2, 5, 8], dtype='i4')
+    offsets = pa.Array.from_pandas(offsets_arr, type=pa.int32())
+    pyvalues = [b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h']
+    values = pa.array(pyvalues, type=pa.binary())
+
+    result = pa.ListArray.from_arrays(offsets, values)
+    expected = pa.array([pyvalues[:2], pyvalues[2:5], pyvalues[5:8]])
+
+    assert result.equals(expected)
+
+
+def test_simple_type_construction():
+    result = pa.lib.TimestampType()
+    with pytest.raises(TypeError):
+        str(result)
+
+
+@pytest.mark.parametrize(
+    ('type', 'expected'),
+    [
+        (pa.null(), 'float64'),
+        (pa.bool_(), 'bool'),
+        (pa.int8(), 'int8'),
+        (pa.int16(), 'int16'),
+        (pa.int32(), 'int32'),
+        (pa.int64(), 'int64'),
+        (pa.uint8(), 'uint8'),
+        (pa.uint16(), 'uint16'),
+        (pa.uint32(), 'uint32'),
+        (pa.uint64(), 'uint64'),
+        (pa.float16(), 'float16'),
+        (pa.float32(), 'float32'),
+        (pa.float64(), 'float64'),
+        (pa.date32(), 'date'),
+        (pa.date64(), 'date'),
+        (pa.binary(), 'bytes'),
+        (pa.binary(length=4), 'bytes'),
+        (pa.string(), 'unicode'),
+        (pa.list_(pa.list_(pa.int16())), 'list[list[int16]]'),
+        (pa.decimal(18, 3), 'decimal'),
+        (pa.timestamp('ms'), 'datetime'),
+        (pa.timestamp('us', 'UTC'), 'datetimetz'),
+        (pa.time32('s'), 'time'),
+        (pa.time64('us'), 'time')
+    ]
+)
+def test_logical_type(type, expected):
+    assert get_logical_type(type) == expected

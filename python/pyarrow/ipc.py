@@ -18,10 +18,34 @@
 # Arrow file and stream reader/writer classes, and other messaging tools
 
 import pyarrow as pa
+
+from pyarrow.lib import (Message, MessageReader,  # noqa
+                         read_message, read_record_batch,
+                         read_tensor, write_tensor,
+                         get_record_batch_size, get_tensor_size)
 import pyarrow.lib as lib
 
 
-class RecordBatchStreamReader(lib._RecordBatchReader):
+class _ReadPandasOption(object):
+
+    def read_pandas(self, **options):
+        """
+        Read contents of stream and convert to pandas.DataFrame using
+        Table.to_pandas
+
+        Parameters
+        ----------
+        **options : arguments to forward to Table.to_pandas
+
+        Returns
+        -------
+        df : pandas.DataFrame
+        """
+        table = self.read_all()
+        return table.to_pandas(**options)
+
+
+class RecordBatchStreamReader(lib._RecordBatchReader, _ReadPandasOption):
     """
     Reader for the Arrow streaming binary format
 
@@ -32,10 +56,6 @@ class RecordBatchStreamReader(lib._RecordBatchReader):
     """
     def __init__(self, source):
         self._open(source)
-
-    def __iter__(self):
-        while True:
-            yield self.get_next_batch()
 
 
 class RecordBatchStreamWriter(lib._RecordBatchWriter):
@@ -53,7 +73,7 @@ class RecordBatchStreamWriter(lib._RecordBatchWriter):
         self._open(sink, schema)
 
 
-class RecordBatchFileReader(lib._RecordBatchFileReader):
+class RecordBatchFileReader(lib._RecordBatchFileReader, _ReadPandasOption):
     """
     Class for reading Arrow record batch data from the Arrow binary file format
 
@@ -136,7 +156,7 @@ def serialize_pandas(df):
     """
     batch = pa.RecordBatch.from_pandas(df)
     sink = pa.InMemoryOutputStream()
-    writer = pa.RecordBatchFileWriter(sink, batch.schema)
+    writer = pa.RecordBatchStreamWriter(sink, batch.schema)
     writer.write_batch(batch)
     writer.close()
     return sink.get_result()
@@ -157,6 +177,6 @@ def deserialize_pandas(buf, nthreads=1):
     df : pandas.DataFrame
     """
     buffer_reader = pa.BufferReader(buf)
-    reader = pa.RecordBatchFileReader(buffer_reader)
+    reader = pa.RecordBatchStreamReader(buffer_reader)
     table = reader.read_all()
     return table.to_pandas(nthreads=nthreads)

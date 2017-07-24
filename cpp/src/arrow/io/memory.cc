@@ -55,7 +55,7 @@ Status BufferOutputStream::Create(int64_t initial_capacity, MemoryPool* pool,
 
 BufferOutputStream::~BufferOutputStream() {
   // This can fail, better to explicitly call close
-  if (buffer_) { Close(); }
+  if (buffer_) { DCHECK(Close().ok()); }
 }
 
 Status BufferOutputStream::Close() {
@@ -96,6 +96,23 @@ Status BufferOutputStream::Reserve(int64_t nbytes) {
     capacity_ = new_capacity;
   }
   mutable_data_ = buffer_->mutable_data();
+  return Status::OK();
+}
+
+// ----------------------------------------------------------------------
+// OutputStream that doesn't write anything
+
+Status MockOutputStream::Close() {
+  return Status::OK();
+}
+
+Status MockOutputStream::Tell(int64_t* position) {
+  *position = extent_bytes_written_;
+  return Status::OK();
+}
+
+Status MockOutputStream::Write(const uint8_t* data, int64_t nbytes) {
+  extent_bytes_written_ += nbytes;
   return Status::OK();
 }
 

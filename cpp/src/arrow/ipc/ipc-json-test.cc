@@ -169,7 +169,7 @@ TEST(TestJsonArrayWriter, NestedTypes) {
   std::vector<int32_t> offsets = {0, 0, 0, 1, 4, 7};
 
   std::shared_ptr<Buffer> list_bitmap;
-  ASSERT_OK(test::GetBitmapFromBoolVector(list_is_valid, &list_bitmap));
+  ASSERT_OK(test::GetBitmapFromVector(list_is_valid, &list_bitmap));
   std::shared_ptr<Buffer> offsets_buffer = test::GetBufferFromVector(offsets);
 
   ListArray list_array(list(value_type), 5, offsets_buffer, values_array, list_bitmap, 1);
@@ -179,7 +179,7 @@ TEST(TestJsonArrayWriter, NestedTypes) {
   // Struct
   std::vector<bool> struct_is_valid = {true, false, true, true, true, false, true};
   std::shared_ptr<Buffer> struct_bitmap;
-  ASSERT_OK(test::GetBitmapFromBoolVector(struct_is_valid, &struct_bitmap));
+  ASSERT_OK(test::GetBitmapFromVector(struct_is_valid, &struct_bitmap));
 
   auto struct_type =
       struct_({field("f1", int32()), field("f2", int32()), field("f3", int32())});
@@ -224,10 +224,10 @@ void MakeBatchArrays(const std::shared_ptr<Schema>& schema, const int num_rows,
   StringBuilder string_builder(default_memory_pool());
   for (int i = 0; i < num_rows; ++i) {
     if (!is_valid[i]) {
-      string_builder.AppendNull();
+      ASSERT_OK(string_builder.AppendNull());
     } else {
       test::random_ascii(kBufferSize, seed++, buffer);
-      string_builder.Append(buffer, kBufferSize);
+      ASSERT_OK(string_builder.Append(buffer, kBufferSize));
     }
   }
   std::shared_ptr<Array> v3;
@@ -276,7 +276,7 @@ TEST(TestJsonFileReadWrite, BasicRoundTrip) {
 
   for (int i = 0; i < nbatches; ++i) {
     std::shared_ptr<RecordBatch> batch;
-    ASSERT_OK(reader->GetRecordBatch(i, &batch));
+    ASSERT_OK(reader->ReadRecordBatch(i, &batch));
     ASSERT_TRUE(batch->Equals(*batches[i]));
   }
 }
@@ -344,7 +344,7 @@ TEST(TestJsonFileReadWrite, MinimalFormatExample) {
   ASSERT_EQ(1, reader->num_record_batches());
 
   std::shared_ptr<RecordBatch> batch;
-  ASSERT_OK(reader->GetRecordBatch(0, &batch));
+  ASSERT_OK(reader->ReadRecordBatch(0, &batch));
 
   std::vector<bool> foo_valid = {true, false, true, true, true};
   std::vector<int32_t> foo_values = {1, 2, 3, 4, 5};
@@ -388,7 +388,7 @@ void CheckRoundtrip(const RecordBatch& batch) {
   ASSERT_OK(JsonReader::Open(buffer, &reader));
 
   std::shared_ptr<RecordBatch> result_batch;
-  ASSERT_OK(reader->GetRecordBatch(0, &result_batch));
+  ASSERT_OK(reader->ReadRecordBatch(0, &result_batch));
 
   CompareBatch(batch, *result_batch);
 }

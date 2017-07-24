@@ -18,15 +18,16 @@
 from pytest import skip
 
 
-groups = ['hdfs', 'parquet']
+groups = ['hdfs', 'parquet', 'large_memory']
 
 defaults = {
     'hdfs': False,
-    'parquet': False
+    'parquet': False,
+    'large_memory': False
 }
 
 try:
-    import pyarrow.parquet
+    import pyarrow.parquet  # noqa
     defaults['parquet'] = True
 except ImportError:
     pass

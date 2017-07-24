@@ -294,6 +294,16 @@ class TestFeatherReader(unittest.TestCase):
         df = pd.DataFrame({'strings': [''] * 10})
         self._check_pandas_roundtrip(df)
 
+    def test_all_none(self):
+        df = pd.DataFrame({'all_none': [None] * 10})
+        self._check_pandas_roundtrip(df, null_counts=[10])
+
+    def test_all_null_category(self):
+        # ARROW-1188
+        df = pd.DataFrame({"A": (1, 2, 3), "B": (None, None, None)})
+        df = df.assign(B=df.B.astype("category"))
+        self._check_pandas_roundtrip(df, null_counts=[0, 3])
+
     def test_multithreaded_read(self):
         data = {'c{0}'.format(i): [''] * 10
                 for i in range(100)}
@@ -355,7 +365,8 @@ class TestFeatherReader(unittest.TestCase):
         expected = df.rename(columns=str)
         self._check_pandas_roundtrip(df, expected)
 
-    @pytest.mark.skipif(not os.path.supports_unicode_filenames, reason='unicode filenames not supported')
+    @pytest.mark.skipif(not os.path.supports_unicode_filenames,
+                        reason='unicode filenames not supported')
     def test_unicode_filename(self):
         # GH #209
         name = (b'Besa_Kavaj\xc3\xab.feather').decode('utf-8')

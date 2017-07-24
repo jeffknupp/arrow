@@ -414,7 +414,7 @@ class ArrayWriter {
   template <typename T>
   typename std::enable_if<IsSignedInt<T>::value, void>::type WriteDataValues(
       const T& arr) {
-    const auto data = arr.raw_data();
+    const auto data = arr.raw_values();
     for (int i = 0; i < arr.length(); ++i) {
       writer_->Int64(data[i]);
     }
@@ -423,7 +423,7 @@ class ArrayWriter {
   template <typename T>
   typename std::enable_if<IsUnsignedInt<T>::value, void>::type WriteDataValues(
       const T& arr) {
-    const auto data = arr.raw_data();
+    const auto data = arr.raw_values();
     for (int i = 0; i < arr.length(); ++i) {
       writer_->Uint64(data[i]);
     }
@@ -432,7 +432,7 @@ class ArrayWriter {
   template <typename T>
   typename std::enable_if<IsFloatingPoint<T>::value, void>::type WriteDataValues(
       const T& arr) {
-    const auto data = arr.raw_data();
+    const auto data = arr.raw_values();
     for (int i = 0; i < arr.length(); ++i) {
       writer_->Double(data[i]);
     }
@@ -558,7 +558,12 @@ class ArrayWriter {
   Status Visit(const StructArray& array) {
     WriteValidityField(array);
     const auto& type = static_cast<const StructType&>(*array.type());
-    return WriteChildren(type.children(), array.fields());
+    std::vector<std::shared_ptr<Array>> children;
+    children.reserve(array.num_fields());
+    for (int i = 0; i < array.num_fields(); ++i) {
+      children.emplace_back(array.field(i));
+    }
+    return WriteChildren(type.children(), children);
   }
 
   Status Visit(const UnionArray& array) {
@@ -569,7 +574,12 @@ class ArrayWriter {
     if (type.mode() == UnionMode::DENSE) {
       WriteIntegerField("OFFSET", array.raw_value_offsets(), array.length());
     }
-    return WriteChildren(type.children(), array.children());
+    std::vector<std::shared_ptr<Array>> children;
+    children.reserve(array.num_fields());
+    for (int i = 0; i < array.num_fields(); ++i) {
+      children.emplace_back(array.child(i));
+    }
+    return WriteChildren(type.children(), children);
   }
 
  private:
@@ -974,12 +984,12 @@ class ArrayReader {
     DCHECK_EQ(static_cast<int32_t>(json_data_arr.Size()), length_);
     for (int i = 0; i < length_; ++i) {
       if (!is_valid_[i]) {
-        builder.AppendNull();
+        RETURN_NOT_OK(builder.AppendNull());
         continue;
       }
 
       const rj::Value& val = json_data_arr[i];
-      builder.Append(UnboxValue<T>(val));
+      RETURN_NOT_OK(builder.Append(UnboxValue<T>(val)));
     }
 
     return builder.Finish(&result_);
@@ -1000,14 +1010,14 @@ class ArrayReader {
     auto byte_buffer = std::make_shared<PoolBuffer>(pool_);
     for (int i = 0; i < length_; ++i) {
       if (!is_valid_[i]) {
-        builder.AppendNull();
+        RETURN_NOT_OK(builder.AppendNull());
         continue;
       }
 
       const rj::Value& val = json_data_arr[i];
       DCHECK(val.IsString());
       if (std::is_base_of<StringType, T>::value) {
-        builder.Append(val.GetString());
+        RETURN_NOT_OK(builder.Append(val.GetString()));
       } else {
         std::string hex_string = val.GetString();
 
@@ -1048,7 +1058,7 @@ class ArrayReader {
 
     for (int i = 0; i < length_; ++i) {
       if (!is_valid_[i]) {
-        builder.AppendNull();
+        RETURN_NOT_OK(builder.AppendNull());
         continue;
       }
 

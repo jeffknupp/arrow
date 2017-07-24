@@ -36,9 +36,14 @@ import pandas.util.testing as tm
 parquet = pytest.mark.parquet
 
 
-def _write_table(*args, **kwargs):
+def _write_table(table, path, **kwargs):
     import pyarrow.parquet as pq
-    return pq.write_table(*args, **kwargs)
+
+    if isinstance(table, pd.DataFrame):
+        table = pa.Table.from_pandas(table)
+
+    pq.write_table(table, path, **kwargs)
+    return table
 
 
 def _read_table(*args, **kwargs):
@@ -451,17 +456,44 @@ def test_date_time_types():
     ex_t6 = pa.time32('ms')
     ex_a6 = pa.Array.from_pandas(data4 * 1000, type=ex_t6)
 
-    table = pa.Table.from_arrays([a1, a2, a3, a4, a5, a6],
+    t7 = pa.timestamp('ns')
+    start = pd.Timestamp('2001-01-01').value
+    data7 = np.array([start, start + 1, start + 2], dtype='int64')
+    a7 = pa.Array.from_pandas(data7, type=t7)
+
+    t7_us = pa.timestamp('us')
+    start = pd.Timestamp('2001-01-01').value
+    data7_us = np.array([start, start + 1, start + 2], dtype='int64') // 1000
+    a7_us = pa.Array.from_pandas(data7_us, type=t7_us)
+
+    table = pa.Table.from_arrays([a1, a2, a3, a4, a5, a6, a7],
                                  ['date32', 'date64', 'timestamp[us]',
-                                  'time32[s]', 'time64[us]', 'time32_from64[s]'])
+                                  'time32[s]', 'time64[us]',
+                                  'time32_from64[s]',
+                                  'timestamp[ns]'])
 
     # date64 as date32
     # time32[s] to time32[ms]
-    expected = pa.Table.from_arrays([a1, a1, a3, a4, a5, ex_a6],
+    # 'timestamp[ns]' to 'timestamp[us]'
+    expected = pa.Table.from_arrays([a1, a1, a3, a4, a5, ex_a6, a7_us],
                                     ['date32', 'date64', 'timestamp[us]',
-                                     'time32[s]', 'time64[us]', 'time32_from64[s]'])
+                                     'time32[s]', 'time64[us]',
+                                     'time32_from64[s]',
+                                     'timestamp[ns]'])
 
     _check_roundtrip(table, expected=expected, version='2.0')
+
+    # date64 as date32
+    # time32[s] to time32[ms]
+    # 'timestamp[ns]' is saved as INT96 timestamp
+    expected = pa.Table.from_arrays([a1, a1, a3, a4, a5, ex_a6, a7],
+                                    ['date32', 'date64', 'timestamp[us]',
+                                     'time32[s]', 'time64[us]',
+                                     'time32_from64[s]',
+                                     'timestamp[ns]'])
+
+    _check_roundtrip(table, expected=expected, version='2.0',
+                     use_deprecated_int96_timestamps=True)
 
     # Unsupported stuff
     def _assert_unsupported(array):
@@ -802,9 +834,6 @@ def test_read_multiple_files(tmpdir):
 
     assert result.equals(expected)
 
-    with pytest.raises(NotImplementedError):
-        pq.read_pandas(dirpath)
-
     # Read with provided metadata
     metadata = pq.ParquetFile(paths[0]).metadata
 
@@ -849,6 +878,115 @@ def test_read_multiple_files(tmpdir):
         read_multiple_files(mixed_paths)
 
 
+@parquet
+def test_dataset_read_pandas(tmpdir):
+    import pyarrow.parquet as pq
+
+    nfiles = 5
+    size = 5
+
+    dirpath = tmpdir.join(guid()).strpath
+    os.mkdir(dirpath)
+
+    test_data = []
+    frames = []
+    paths = []
+    for i in range(nfiles):
+        df = _test_dataframe(size, seed=i)
+        df.index = np.arange(i * size, (i + 1) * size)
+        df.index.name = 'index'
+
+        path = pjoin(dirpath, '{0}.parquet'.format(i))
+
+        table = pa.Table.from_pandas(df)
+        _write_table(table, path)
+        test_data.append(table)
+        frames.append(df)
+        paths.append(path)
+
+    dataset = pq.ParquetDataset(dirpath)
+    columns = ['uint8', 'strings']
+    result = dataset.read_pandas(columns=columns).to_pandas()
+    expected = pd.concat([x[columns] for x in frames])
+
+    tm.assert_frame_equal(result, expected)
+
+
+@parquet
+def test_dataset_read_pandas_common_metadata(tmpdir):
+    # ARROW-1103
+    import pyarrow.parquet as pq
+
+    nfiles = 5
+    size = 5
+
+    dirpath = tmpdir.join(guid()).strpath
+    os.mkdir(dirpath)
+
+    test_data = []
+    frames = []
+    paths = []
+    for i in range(nfiles):
+        df = _test_dataframe(size, seed=i)
+        df.index = pd.Index(np.arange(i * size, (i + 1) * size))
+        df.index.name = 'index'
+
+        path = pjoin(dirpath, '{0}.parquet'.format(i))
+
+        df_ex_index = df.reset_index(drop=True)
+        df_ex_index['index'] = df.index
+        table = pa.Table.from_pandas(df_ex_index,
+                                     preserve_index=False)
+
+        # Obliterate metadata
+        table = table.replace_schema_metadata(None)
+        assert table.schema.metadata is None
+
+        _write_table(table, path)
+        test_data.append(table)
+        frames.append(df)
+        paths.append(path)
+
+    # Write _metadata common file
+    table_for_metadata = pa.Table.from_pandas(df)
+    pq.write_metadata(table_for_metadata.schema,
+                      pjoin(dirpath, '_metadata'))
+
+    dataset = pq.ParquetDataset(dirpath)
+    columns = ['uint8', 'strings']
+    result = dataset.read_pandas(columns=columns).to_pandas()
+    expected = pd.concat([x[columns] for x in frames])
+
+    tm.assert_frame_equal(result, expected)
+
+
+@parquet
+def test_ignore_private_directories(tmpdir):
+    import pyarrow.parquet as pq
+
+    nfiles = 10
+    size = 5
+
+    dirpath = tmpdir.join(guid()).strpath
+    os.mkdir(dirpath)
+
+    test_data = []
+    paths = []
+    for i in range(nfiles):
+        df = _test_dataframe(size, seed=i)
+        path = pjoin(dirpath, '{0}.parquet'.format(i))
+
+        test_data.append(_write_table(df, path))
+        paths.append(path)
+
+    # private directory
+    os.mkdir(pjoin(dirpath, '_impala_staging'))
+
+    dataset = pq.ParquetDataset(dirpath)
+    assert set(paths) == set(x.path for x in dataset.pieces)
+
+
+@parquet
 def test_multiindex_duplicate_values(tmpdir):
     num_rows = 3
     numbers = list(range(num_rows))

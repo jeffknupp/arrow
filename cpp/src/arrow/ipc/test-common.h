@@ -86,7 +86,9 @@ static inline void CompareArraysDetailed(
 static inline void CompareBatchColumnsDetailed(
     const RecordBatch& result, const RecordBatch& expected) {
   for (int i = 0; i < expected.num_columns(); ++i) {
-    CompareArraysDetailed(i, *result.column(i), *expected.column(i));
+    auto left = result.column(i);
+    auto right = expected.column(i);
+    CompareArraysDetailed(i, *left, *right);
   }
 }
 
@@ -96,11 +98,11 @@ const auto kListListInt32 = list(kListInt32);
 Status MakeRandomInt32Array(
     int64_t length, bool include_nulls, MemoryPool* pool, std::shared_ptr<Array>* out) {
   std::shared_ptr<PoolBuffer> data;
-  test::MakeRandomInt32PoolBuffer(length, pool, &data);
+  RETURN_NOT_OK(test::MakeRandomInt32PoolBuffer(length, pool, &data));
   Int32Builder builder(pool, int32());
   if (include_nulls) {
     std::shared_ptr<PoolBuffer> valid_bytes;
-    test::MakeRandomBytePoolBuffer(length, pool, &valid_bytes);
+    RETURN_NOT_OK(test::MakeRandomBytePoolBuffer(length, pool, &valid_bytes));
     RETURN_NOT_OK(builder.Append(
         reinterpret_cast<const int32_t*>(data->data()), length, valid_bytes->data()));
     return builder.Finish(out);
@@ -137,9 +139,16 @@ Status MakeRandomListArray(const std::shared_ptr<Array>& child_array, int num_li
     std::replace_if(offsets.begin(), offsets.end(),
         [child_length](int32_t offset) { return offset > child_length; }, child_length);
   }
-  ListBuilder builder(pool, child_array);
-  RETURN_NOT_OK(builder.Append(offsets.data(), num_lists, valid_lists.data()));
-  RETURN_NOT_OK(builder.Finish(out));
+
+  offsets[num_lists] = static_cast<int32_t>(child_array->length());
+
+  /// TODO(wesm): Implement support for nulls in ListArray::FromArrays
+  std::shared_ptr<Buffer> null_bitmap, offsets_buffer;
+  RETURN_NOT_OK(test::GetBitmapFromVector(valid_lists, &null_bitmap));
+  RETURN_NOT_OK(test::CopyBufferFromVector(offsets, pool, &offsets_buffer));
+
+  *out = std::make_shared<ListArray>(list(child_array->type()), num_lists, offsets_buffer,
+      child_array, null_bitmap, kUnknownNullCount);
   return ValidateArray(**out);
 }
 
@@ -149,11 +158,13 @@ Status MakeRandomBooleanArray(
     const int length, bool include_nulls, std::shared_ptr<Array>* out) {
   std::vector<uint8_t> values(length);
   test::random_null_bytes(length, 0.5, values.data());
-  auto data = test::bytes_to_null_buffer(values);
+  std::shared_ptr<Buffer> data;
+  RETURN_NOT_OK(BitUtil::BytesToBits(values, &data));
 
   if (include_nulls) {
     std::vector<uint8_t> valid_bytes(length);
-    auto null_bitmap = test::bytes_to_null_buffer(valid_bytes);
+    std::shared_ptr<Buffer> null_bitmap;
+    RETURN_NOT_OK(BitUtil::BytesToBits(valid_bytes, &null_bitmap));
     test::random_null_bytes(length, 0.1, valid_bytes.data());
     *out = std::make_shared<BooleanArray>(length, data, null_bitmap, -1);
   } else {
@@ -240,6 +251,15 @@ Status MakeStringTypesRecordBatch(std::shared_ptr<RecordBatch>* out) {
     RETURN_NOT_OK(s);
   }
   out->reset(new RecordBatch(schema, length, {a0, a1}));
+  return Status::OK();
+}
+
+Status MakeNullRecordBatch(std::shared_ptr<RecordBatch>* out) {
+  const int64_t length = 500;
+  auto f0 = field("f0", null());
+  std::shared_ptr<Schema> schema(new Schema({f0}));
+  std::shared_ptr<Array> a0 = std::make_shared<NullArray>(length);
+  out->reset(new RecordBatch(schema, length, {a0}));
   return Status::OK();
 }
 
@@ -385,7 +405,8 @@ Status MakeUnion(std::shared_ptr<RecordBatch>* out) {
 
   std::shared_ptr<Buffer> type_ids_buffer;
   std::vector<uint8_t> type_ids = {5, 10, 5, 5, 10, 10, 5};
-  RETURN_NOT_OK(test::CopyBufferFromVector(type_ids, &type_ids_buffer));
+  RETURN_NOT_OK(
+      test::CopyBufferFromVector(type_ids, default_memory_pool(), &type_ids_buffer));
 
   std::vector<int32_t> u0_values = {0, 1, 2, 3, 4, 5, 6};
   ArrayFromVector<Int32Type, int32_t>(u0_values, &sparse_children[0]);
@@ -402,7 +423,8 @@ Status MakeUnion(std::shared_ptr<RecordBatch>* out) {
 
   std::shared_ptr<Buffer> offsets_buffer;
   std::vector<int32_t> offsets = {0, 0, 1, 2, 1, 2, 3};
-  RETURN_NOT_OK(test::CopyBufferFromVector(offsets, &offsets_buffer));
+  RETURN_NOT_OK(
+      test::CopyBufferFromVector(offsets, default_memory_pool(), &offsets_buffer));
 
   std::vector<uint8_t> null_bytes(length, 1);
   null_bytes[2] = 0;
@@ -466,10 +488,10 @@ Status MakeDictionary(std::shared_ptr<RecordBatch>* out) {
   ArrayFromVector<Int8Type, int8_t>(is_valid3, indices3_values, &indices3);
 
   std::shared_ptr<Buffer> null_bitmap;
-  RETURN_NOT_OK(test::GetBitmapFromBoolVector(is_valid, &null_bitmap));
+  RETURN_NOT_OK(test::GetBitmapFromVector(is_valid, &null_bitmap));
 
   std::shared_ptr<Array> a3 = std::make_shared<ListArray>(f3_type, length,
-      std::static_pointer_cast<PrimitiveArray>(offsets)->data(),
+      std::static_pointer_cast<PrimitiveArray>(offsets)->values(),
       std::make_shared<DictionaryArray>(f1_type, indices3), null_bitmap, 1);
 
   // Dictionary-encoded list of integer
@@ -485,7 +507,7 @@ Status MakeDictionary(std::shared_ptr<RecordBatch>* out) {
   ArrayFromVector<Int8Type, int8_t>(std::vector<bool>(3, true), list_values4, &values4);
 
   auto dict3 = std::make_shared<ListArray>(f4_value_type, 3,
-      std::static_pointer_cast<PrimitiveArray>(offsets4)->data(), values4);
+      std::static_pointer_cast<PrimitiveArray>(offsets4)->values(), values4);
 
   std::vector<int8_t> indices4_values = {0, 1, 2, 0, 1, 2};
   ArrayFromVector<Int8Type, int8_t>(is_valid, indices4_values, &indices4);
@@ -611,9 +633,9 @@ void AppendValues(const std::vector<bool>& is_valid, const std::vector<T>& value
     BuilderType* builder) {
   for (size_t i = 0; i < values.size(); ++i) {
     if (is_valid[i]) {
-      builder->Append(values[i]);
+      ASSERT_OK(builder->Append(values[i]));
     } else {
-      builder->AppendNull();
+      ASSERT_OK(builder->AppendNull());
     }
   }
 }

@@ -49,6 +49,10 @@ void CheckArray(const Array& arr, int indent, const char* expected) {
   ASSERT_OK(PrettyPrint(arr, indent, &sink));
   std::string result = sink.str();
   ASSERT_EQ(std::string(expected, strlen(expected)), result);
+
+  std::stringstream ss;
+  ss << arr;
+  ASSERT_EQ(result, ss.str());
 }
 
 template <typename TYPE, typename C_TYPE>
@@ -87,10 +91,10 @@ TEST_F(TestPrettyPrint, FixedSizeBinaryType) {
   auto type = fixed_size_binary(3);
   FixedSizeBinaryBuilder builder(default_memory_pool(), type);
 
-  builder.Append(values[0]);
-  builder.Append(values[1]);
-  builder.Append(values[2]);
-  builder.Finish(&array);
+  ASSERT_OK(builder.Append(values[0]));
+  ASSERT_OK(builder.Append(values[1]));
+  ASSERT_OK(builder.Append(values[2]));
+  ASSERT_OK(builder.Finish(&array));
 
   CheckArray(*array, 0, ex);
 }

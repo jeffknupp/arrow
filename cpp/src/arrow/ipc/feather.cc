@@ -33,7 +33,6 @@
 #include "arrow/io/file.h"
 #include "arrow/ipc/feather-internal.h"
 #include "arrow/ipc/feather_generated.h"
-#include "arrow/loader.h"
 #include "arrow/status.h"
 #include "arrow/table.h"
 #include "arrow/util/bit-util.h"
@@ -64,6 +63,21 @@ static int64_t GetOutputLength(int64_t nbytes) {
 static Status WritePadded(io::OutputStream* stream, const uint8_t* data, int64_t length,
     int64_t* bytes_written) {
   RETURN_NOT_OK(stream->Write(data, length));
+
+  int64_t remainder = PaddedLength(length) - length;
+  if (remainder != 0) { RETURN_NOT_OK(stream->Write(kPaddingBytes, remainder)); }
+  *bytes_written = length + remainder;
+  return Status::OK();
+}
+
+/// For compability, we need to write any data sometimes just to keep producing
+/// files that can be read with an older reader.
+static Status WritePaddedBlank(
+    io::OutputStream* stream, int64_t length, int64_t* bytes_written) {
+  const uint8_t null = 0;
+  for (int64_t i = 0; i < length; i++) {
+    RETURN_NOT_OK(stream->Write(&null, 1));
+  }
 
   int64_t remainder = PaddedLength(length) - length;
   if (remainder != 0) { RETURN_NOT_OK(stream->Write(kPaddingBytes, remainder)); }
@@ -483,6 +497,18 @@ fbs::Type ToFlatbufferType(Type::type type) {
   return fbs::Type_MIN;
 }
 
+static Status SanitizeUnsupportedTypes(const Array& values, std::shared_ptr<Array>* out) {
+  if (values.type_id() == Type::NA) {
+    // As long as R doesn't support NA, we write this as a StringColumn
+    // to ensure stable roundtrips.
+    *out = std::make_shared<StringArray>(
+        values.length(), nullptr, nullptr, values.null_bitmap(), values.null_count());
+    return Status::OK();
+  } else {
+    return MakeArray(values.data(), out);
+  }
+}
+
 class TableWriter::TableWriterImpl : public ArrayVisitor {
  public:
   TableWriterImpl() : initialized_stream_(false), metadata_(0) {}
@@ -498,7 +524,7 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
 
   Status Finalize() {
     RETURN_NOT_OK(CheckStarted());
-    metadata_.Finish();
+    RETURN_NOT_OK(metadata_.Finish());
 
     auto buffer = metadata_.GetBuffer();
 
@@ -543,8 +569,13 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
     if (values.null_count() > 0) {
       // We assume there is one bit for each value in values.nulls, aligned on a
       // byte boundary, and we write this much data into the stream
-      RETURN_NOT_OK(WritePadded(stream_.get(), values.null_bitmap()->data(),
-          values.null_bitmap()->size(), &bytes_written));
+      if (values.null_bitmap()) {
+        RETURN_NOT_OK(WritePadded(stream_.get(), values.null_bitmap()->data(),
+            values.null_bitmap()->size(), &bytes_written));
+      } else {
+        RETURN_NOT_OK(WritePaddedBlank(
+            stream_.get(), BitUtil::BytesForBits(values.length()), &bytes_written));
+      }
       meta->total_bytes += bytes_written;
     }
 
@@ -557,15 +588,19 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
 
       int64_t offset_bytes = sizeof(int32_t) * (values.length() + 1);
 
-      values_bytes = bin_values.raw_value_offsets()[values.length()];
+      if (bin_values.value_offsets()) {
+        values_bytes = bin_values.raw_value_offsets()[values.length()];
 
-      // Write the variable-length offsets
-      RETURN_NOT_OK(WritePadded(stream_.get(),
-          reinterpret_cast<const uint8_t*>(bin_values.raw_value_offsets()), offset_bytes,
-          &bytes_written))
+        // Write the variable-length offsets
+        RETURN_NOT_OK(WritePadded(stream_.get(),
+            reinterpret_cast<const uint8_t*>(bin_values.raw_value_offsets()),
+            offset_bytes, &bytes_written));
+      } else {
+        RETURN_NOT_OK(WritePaddedBlank(stream_.get(), offset_bytes, &bytes_written));
+      }
       meta->total_bytes += bytes_written;
 
-      if (bin_values.data()) { values_buffer = bin_values.data()->data(); }
+      if (bin_values.value_data()) { values_buffer = bin_values.value_data()->data(); }
     } else {
       const auto& prim_values = static_cast<const PrimitiveArray&>(values);
       const auto& fw_type = static_cast<const FixedWidthType&>(*values.type());
@@ -577,10 +612,14 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
         values_bytes = values.length() * fw_type.bit_width() / 8;
       }
 
-      if (prim_values.data()) { values_buffer = prim_values.data()->data(); }
+      if (prim_values.values()) { values_buffer = prim_values.values()->data(); }
     }
-    RETURN_NOT_OK(
-        WritePadded(stream_.get(), values_buffer, values_bytes, &bytes_written));
+    if (values_buffer) {
+      RETURN_NOT_OK(
+          WritePadded(stream_.get(), values_buffer, values_bytes, &bytes_written));
+    } else {
+      RETURN_NOT_OK(WritePaddedBlank(stream_.get(), values_bytes, &bytes_written));
+    }
     meta->total_bytes += bytes_written;
 
     return Status::OK();
@@ -592,6 +631,12 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
     RETURN_NOT_OK(WriteArray(values, &meta));
     current_column_->SetValues(meta);
     return Status::OK();
+  }
+
+  Status Visit(const NullArray& values) override {
+    std::shared_ptr<Array> sanitized_nulls;
+    RETURN_NOT_OK(SanitizeUnsupportedTypes(values, &sanitized_nulls));
+    return WritePrimitiveValues(*sanitized_nulls);
   }
 
 #define VISIT_PRIMITIVE(TYPE) \
@@ -623,7 +668,10 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
     RETURN_NOT_OK(WritePrimitiveValues(*values.indices()));
 
     ArrayMetadata levels_meta;
-    RETURN_NOT_OK(WriteArray(*dict_type.dictionary(), &levels_meta));
+    std::shared_ptr<Array> sanitized_dictionary;
+    RETURN_NOT_OK(
+        SanitizeUnsupportedTypes(*dict_type.dictionary(), &sanitized_dictionary));
+    RETURN_NOT_OK(WriteArray(*sanitized_dictionary, &levels_meta));
     current_column_->SetCategory(levels_meta, dict_type.ordered());
     return Status::OK();
   }
@@ -655,8 +703,7 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
   Status Append(const std::string& name, const Array& values) {
     current_column_ = metadata_.AddColumn(name);
     RETURN_NOT_OK(values.Accept(this));
-    current_column_->Finish();
-    return Status::OK();
+    return current_column_->Finish();
   }
 
  private:

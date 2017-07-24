@@ -41,25 +41,27 @@ class DecimalTestBase {
     size_t null_count = 0;
 
     size_t size = draw.size();
-    builder->Reserve(size);
+    ASSERT_OK(builder->Reserve(size));
 
     for (size_t i = 0; i < size; ++i) {
       if (valid_bytes[i]) {
-        builder->Append(draw[i]);
+        ASSERT_OK(builder->Append(draw[i]));
       } else {
-        builder->AppendNull();
+        ASSERT_OK(builder->AppendNull());
         ++null_count;
       }
     }
 
     std::shared_ptr<Buffer> expected_sign_bitmap;
     if (!sign_bitmap.empty()) {
-      BitUtil::BytesToBits(sign_bitmap, &expected_sign_bitmap);
+      ASSERT_OK(BitUtil::BytesToBits(sign_bitmap, &expected_sign_bitmap));
     }
 
     auto raw_bytes = data(draw, byte_width);
     auto expected_data = std::make_shared<Buffer>(raw_bytes.data(), size * byte_width);
-    auto expected_null_bitmap = test::bytes_to_null_buffer(valid_bytes);
+    std::shared_ptr<Buffer> expected_null_bitmap;
+    ASSERT_OK(BitUtil::BytesToBits(valid_bytes, &expected_null_bitmap));
+
     int64_t expected_null_count = test::null_count(valid_bytes);
     auto expected = std::make_shared<DecimalArray>(type, size, expected_data,
         expected_null_bitmap, expected_null_count, offset, expected_sign_bitmap);

@@ -26,10 +26,10 @@
 #include "arrow/table.h"
 #include "arrow/test-util.h"
 
+#include "arrow/python/arrow_to_pandas.h"
 #include "arrow/python/builtin_convert.h"
 #include "arrow/python/common.h"
 #include "arrow/python/helpers.h"
-#include "arrow/python/pandas_convert.h"
 
 #include "arrow/util/decimal.h"
 
@@ -40,7 +40,7 @@ TEST(PyBuffer, InvalidInputObject) {
   PyBuffer buffer(Py_None);
 }
 
-TEST(DecimalTest, TestPythonDecimalToArrowDecimal128) {
+TEST(DecimalTest, TestPythonDecimalToString) {
   PyAcquireGIL lock;
 
   OwnedRef decimal;
@@ -63,11 +63,13 @@ TEST(DecimalTest, TestPythonDecimalToArrowDecimal128) {
   ASSERT_NE(pydecimal.obj(), nullptr);
   ASSERT_EQ(PyErr_Occurred(), nullptr);
 
-  decimal::Decimal128 arrow_decimal;
   boost::multiprecision::int128_t boost_decimal(decimal_string);
-  PyObject* obj = pydecimal.obj();
-  ASSERT_OK(PythonDecimalToArrowDecimal(obj, &arrow_decimal));
-  ASSERT_EQ(boost_decimal, arrow_decimal.value);
+  PyObject* python_object = pydecimal.obj();
+  ASSERT_NE(python_object, nullptr);
+
+  std::string string_result;
+  ASSERT_OK(PythonDecimalToString(python_object, &string_result));
+  ASSERT_EQ(boost_decimal.str(), string_result);
 }
 
 TEST(PandasConversionTest, TestObjectBlockWriteFails) {
@@ -75,7 +77,7 @@ TEST(PandasConversionTest, TestObjectBlockWriteFails) {
   const char value[] = {'\xf1', '\0'};
 
   for (int i = 0; i < 1000; ++i) {
-    builder.Append(value, static_cast<int32_t>(strlen(value)));
+    ASSERT_OK(builder.Append(value, static_cast<int32_t>(strlen(value))));
   }
 
   std::shared_ptr<Array> arr;

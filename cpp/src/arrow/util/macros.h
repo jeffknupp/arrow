@@ -27,4 +27,26 @@
 
 #define UNUSED(x) (void)x
 
+//
+// GCC can be told that a certain branch is not likely to be taken (for
+// instance, a CHECK failure), and use that information in static analysis.
+// Giving it this information can help it optimize for the common case in
+// the absence of better information (ie. -fprofile-arcs).
+//
+#if defined(__GNUC__)
+#define ARROW_PREDICT_FALSE(x) (__builtin_expect(x, 0))
+#define ARROW_PREDICT_TRUE(x) (__builtin_expect(!!(x), 1))
+#else
+#define ARROW_PREDICT_FALSE(x) x
+#define ARROW_PREDICT_TRUE(x) x
+#endif
+
+#if (defined(__GNUC__) || defined(__APPLE__))
+#define ARROW_MUST_USE_RESULT __attribute__((warn_unused_result))
+#elif defined(_MSC_VER)
+#define ARROW_MUST_USE_RESULT
+#else
+#define ARROW_MUST_USE_RESULT
+#endif
+
 #endif  // ARROW_UTIL_MACROS_H

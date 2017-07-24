@@ -423,10 +423,13 @@ cdef class ParquetReader:
     def set_num_threads(self, int nthreads):
         self.reader.get().set_num_threads(nthreads)
 
-    def read_row_group(self, int i, column_indices=None):
+    def read_row_group(self, int i, column_indices=None, nthreads=None):
         cdef:
             shared_ptr[CTable] ctable
             vector[int] c_column_indices
+
+        if nthreads:
+            self.set_num_threads(nthreads)
 
         if column_indices is not None:
             for index in column_indices:
@@ -442,10 +445,13 @@ cdef class ParquetReader:
                              .ReadRowGroup(i, &ctable))
         return pyarrow_wrap_table(ctable)
 
-    def read_all(self, column_indices=None):
+    def read_all(self, column_indices=None, nthreads=None):
         cdef:
             shared_ptr[CTable] ctable
             vector[int] c_column_indices
+
+        if nthreads:
+            self.set_num_threads(nthreads)
 
         if column_indices is not None:
             for index in column_indices:
@@ -501,6 +507,17 @@ cdef class ParquetReader:
         array.init(carray)
         return array
 
+    def read_schema_field(self, int field_index):
+        cdef:
+            Array array = Array()
+            shared_ptr[CArray] carray
+
+        with nogil:
+            check_status(self.reader.get()
+                         .ReadSchemaField(field_index, &carray));
+
+        array.init(carray)
+        return array
 
 cdef int check_compression_name(name) except -1:
     if name.upper() not in ['NONE', 'SNAPPY', 'GZIP', 'LZO', 'BROTLI']:
@@ -528,13 +545,14 @@ cdef class ParquetWriter:
 
     cdef readonly:
         object use_dictionary
+        object use_deprecated_int96_timestamps
         object compression
         object version
         int row_group_size
 
     def __cinit__(self, where, Schema schema, use_dictionary=None,
                   compression=None, version=None,
-                  MemoryPool memory_pool=None):
+                  MemoryPool memory_pool=None, use_deprecated_int96_timestamps=False):
         cdef:
             shared_ptr[FileOutputStream] filestream
             shared_ptr[OutputStream] sink
@@ -549,6 +567,7 @@ cdef class ParquetWriter:
         self.use_dictionary = use_dictionary
         self.compression = compression
         self.version = version
+        self.use_deprecated_int96_timestamps = use_deprecated_int96_timestamps
 
         cdef WriterProperties.Builder properties_builder
         self._set_version(&properties_builder)
@@ -556,10 +575,21 @@ cdef class ParquetWriter:
         self._set_dictionary_props(&properties_builder)
         properties = properties_builder.build()
 
+        cdef ArrowWriterProperties.Builder arrow_properties_builder
+        self._set_int96_support(&arrow_properties_builder)
+        arrow_properties = arrow_properties_builder.build()
+
         check_status(
             FileWriter.Open(deref(schema.schema),
                             maybe_unbox_memory_pool(memory_pool),
-                            sink, properties, &self.writer))
+                            sink, properties, arrow_properties,
+                            &self.writer))
+
+    cdef void _set_int96_support(self, ArrowWriterProperties.Builder* props):
+        if self.use_deprecated_int96_timestamps:
+            props.enable_deprecated_int96_timestamps()
+        else:
+            props.disable_deprecated_int96_timestamps()
 
     cdef void _set_version(self, WriterProperties.Builder* props):
         if self.version is not None:

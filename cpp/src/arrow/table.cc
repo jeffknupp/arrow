@@ -146,11 +146,33 @@ void AssertBatchValid(const RecordBatch& batch) {
 
 RecordBatch::RecordBatch(const std::shared_ptr<Schema>& schema, int64_t num_rows,
     const std::vector<std::shared_ptr<Array>>& columns)
-    : schema_(schema), num_rows_(num_rows), columns_(columns) {}
+    : schema_(schema), num_rows_(num_rows), columns_(columns.size()) {
+  for (size_t i = 0; i < columns.size(); ++i) {
+    columns_[i] = columns[i]->data();
+  }
+}
 
 RecordBatch::RecordBatch(const std::shared_ptr<Schema>& schema, int64_t num_rows,
     std::vector<std::shared_ptr<Array>>&& columns)
+    : schema_(schema), num_rows_(num_rows), columns_(columns.size()) {
+  for (size_t i = 0; i < columns.size(); ++i) {
+    columns_[i] = columns[i]->data();
+  }
+}
+
+RecordBatch::RecordBatch(const std::shared_ptr<Schema>& schema, int64_t num_rows,
+    std::vector<std::shared_ptr<internal::ArrayData>>&& columns)
     : schema_(schema), num_rows_(num_rows), columns_(std::move(columns)) {}
+
+RecordBatch::RecordBatch(const std::shared_ptr<Schema>& schema, int64_t num_rows,
+    const std::vector<std::shared_ptr<internal::ArrayData>>& columns)
+    : schema_(schema), num_rows_(num_rows), columns_(columns) {}
+
+std::shared_ptr<Array> RecordBatch::column(int i) const {
+  std::shared_ptr<Array> result;
+  DCHECK(MakeArray(columns_[i], &result).ok());
+  return result;
+}
 
 const std::string& RecordBatch::column_name(int i) const {
   return schema_->field(i)->name();
@@ -180,35 +202,47 @@ bool RecordBatch::ApproxEquals(const RecordBatch& other) const {
   return true;
 }
 
+std::shared_ptr<RecordBatch> RecordBatch::ReplaceSchemaMetadata(
+    const std::shared_ptr<const KeyValueMetadata>& metadata) const {
+  auto new_schema = schema_->AddMetadata(metadata);
+  return std::make_shared<RecordBatch>(new_schema, num_rows_, columns_);
+}
+
 std::shared_ptr<RecordBatch> RecordBatch::Slice(int64_t offset) const {
   return Slice(offset, this->num_rows() - offset);
 }
 
 std::shared_ptr<RecordBatch> RecordBatch::Slice(int64_t offset, int64_t length) const {
-  std::vector<std::shared_ptr<Array>> arrays;
+  std::vector<std::shared_ptr<internal::ArrayData>> arrays;
   arrays.reserve(num_columns());
   for (const auto& field : columns_) {
-    arrays.emplace_back(field->Slice(offset, length));
-  }
+    int64_t col_length = std::min(field->length - offset, length);
+    int64_t col_offset = field->offset + offset;
 
+    auto new_data = std::make_shared<internal::ArrayData>(*field);
+    new_data->length = col_length;
+    new_data->offset = col_offset;
+    new_data->null_count = kUnknownNullCount;
+    arrays.emplace_back(new_data);
+  }
   int64_t num_rows = std::min(num_rows_ - offset, length);
-  return std::make_shared<RecordBatch>(schema_, num_rows, arrays);
+  return std::make_shared<RecordBatch>(schema_, num_rows, std::move(arrays));
 }
 
 Status RecordBatch::Validate() const {
   for (int i = 0; i < num_columns(); ++i) {
-    const Array& arr = *columns_[i];
-    if (arr.length() != num_rows_) {
+    const internal::ArrayData& arr = *columns_[i];
+    if (arr.length != num_rows_) {
       std::stringstream ss;
-      ss << "Number of rows in column " << i << " did not match batch: " << arr.length()
+      ss << "Number of rows in column " << i << " did not match batch: " << arr.length
          << " vs " << num_rows_;
       return Status::Invalid(ss.str());
     }
     const auto& schema_type = *schema_->field(i)->type();
-    if (!arr.type()->Equals(schema_type)) {
+    if (!arr.type->Equals(schema_type)) {
       std::stringstream ss;
-      ss << "Column " << i << " type not match schema: " << arr.type()->ToString()
-         << " vs " << schema_type.ToString();
+      ss << "Column " << i << " type not match schema: " << arr.type->ToString() << " vs "
+         << schema_type.ToString();
       return Status::Invalid(ss.str());
     }
   }
@@ -231,6 +265,12 @@ Table::Table(const std::shared_ptr<Schema>& schema,
 Table::Table(const std::shared_ptr<Schema>& schema,
     const std::vector<std::shared_ptr<Column>>& columns, int64_t num_rows)
     : schema_(schema), columns_(columns), num_rows_(num_rows) {}
+
+std::shared_ptr<Table> Table::ReplaceSchemaMetadata(
+    const std::shared_ptr<const KeyValueMetadata>& metadata) const {
+  auto new_schema = schema_->AddMetadata(metadata);
+  return std::make_shared<Table>(new_schema, columns_);
+}
 
 Status Table::FromRecordBatches(const std::vector<std::shared_ptr<RecordBatch>>& batches,
     std::shared_ptr<Table>* table) {

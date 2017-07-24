@@ -23,6 +23,8 @@ import sys
 
 import numpy as np
 
+import pandas as pd
+
 from pyarrow.compat import u, guid
 import pyarrow as pa
 
@@ -158,6 +160,16 @@ def test_buffer_bytearray():
     assert result == val
 
 
+def test_buffer_numpy():
+    # Make sure creating a numpy array from an arrow buffer works
+    byte_array = bytearray(20)
+    byte_array[0] = 42
+    buf = pa.frombuffer(byte_array)
+    array = np.frombuffer(buf, dtype="uint8")
+    assert array[0] == byte_array[0]
+    assert array.base == buf
+
+
 def test_buffer_memoryview_is_immutable():
     val = b'some data'
 
@@ -230,6 +242,43 @@ def test_nativefile_write_memoryview():
     buf = f.get_result()
 
     assert buf.to_pybytes() == data * 2
+
+
+# ----------------------------------------------------------------------
+# Mock output stream
+
+
+def test_mock_output_stream():
+    # Make sure that the MockOutputStream and the BufferOutputStream record the
+    # same size
+
+    # 10 bytes
+    val = b'dataabcdef'
+
+    f1 = pa.MockOutputStream()
+    f2 = pa.BufferOutputStream()
+
+    K = 1000
+    for i in range(K):
+        f1.write(val)
+        f2.write(val)
+
+    assert f1.size() == len(f2.get_result())
+
+    # Do the same test with a pandas DataFrame
+    val = pd.DataFrame({'a': [1, 2, 3]})
+    record_batch = pa.RecordBatch.from_pandas(val)
+
+    f1 = pa.MockOutputStream()
+    f2 = pa.BufferOutputStream()
+
+    stream_writer1 = pa.RecordBatchStreamWriter(f1, record_batch.schema)
+    stream_writer2 = pa.RecordBatchStreamWriter(f2, record_batch.schema)
+
+    stream_writer1.write_batch(record_batch)
+    stream_writer2.write_batch(record_batch)
+
+    assert f1.size() == len(f2.get_result())
 
 
 # ----------------------------------------------------------------------
@@ -315,7 +364,7 @@ def test_memory_map_writer(tmpdir):
     with open(path, 'wb') as f:
         f.write(data)
 
-    f = pa.memory_map(path, mode='r+w')
+    f = pa.memory_map(path, mode='r+b')
 
     f.seek(10)
     f.write('peekaboo')
@@ -324,7 +373,7 @@ def test_memory_map_writer(tmpdir):
     f.seek(10)
     assert f.read(8) == b'peekaboo'
 
-    f2 = pa.memory_map(path, mode='r+w')
+    f2 = pa.memory_map(path, mode='r+b')
 
     f2.seek(10)
     f2.write(b'booapeak')
@@ -365,3 +414,33 @@ def test_os_file_writer(tmpdir):
 
     with pytest.raises(IOError):
         f2.read(5)
+
+
+def test_native_file_modes(tmpdir):
+    path = os.path.join(str(tmpdir), guid())
+    with open(path, 'wb') as f:
+        f.write(b'foooo')
+
+    with pa.OSFile(path, mode='r') as f:
+        assert f.mode == 'rb'
+
+    with pa.OSFile(path, mode='rb') as f:
+        assert f.mode == 'rb'
+
+    with pa.OSFile(path, mode='w') as f:
+        assert f.mode == 'wb'
+
+    with pa.OSFile(path, mode='wb') as f:
+        assert f.mode == 'wb'
+
+    with open(path, 'wb') as f:
+        f.write(b'foooo')
+
+    with pa.memory_map(path, 'r') as f:
+        assert f.mode == 'rb'
+
+    with pa.memory_map(path, 'r+') as f:
+        assert f.mode == 'rb+'
+
+    with pa.memory_map(path, 'r+b') as f:
+        assert f.mode == 'rb+'
